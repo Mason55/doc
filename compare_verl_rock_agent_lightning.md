@@ -85,7 +85,58 @@
 - VERL + Agent Lightning：
   - VERL 负责策略更新，Agent Lightning 负责跨 agent 的统一观测与评估。
 
-## 8. 结论（工程选型）
+## 8. 本质差别分析
+
+### 8.1 抽象层次不同
+
+| 框架 | 抽象层次 | Agent 建模方式 |
+|------|---------|---------------|
+| VERL | 工具级抽象 | Agent = 多轮工具调用状态机 |
+| ROCK/ROLL | 环境级 + 训练级抽象 | Agent = 沙箱中的可执行实体 |
+| Agent Lightning | 观测级抽象 | Agent = 产出可观测轨迹的黑盒 |
+
+- **VERL**：工具（`BaseTool`）是最小接入单元，核心链路为"模型生成 → ToolParser 解析 → 执行工具 → 结果注入 → 继续生成"。
+- **ROCK/ROLL**：ROCK 提供 Sandbox + RuntimeEnv + ModelService 的运行环境；ROLL 提供 rollout → reward → advantage → train 的完整训练闭环。
+- **Agent Lightning**：将 agent 执行建模为 MDP，所有行为统一为 Span/Trace，`LitAgent` 只负责业务逻辑与 rollout。
+
+### 8.2 训练与执行的耦合程度（核心架构差异）
+
+| 框架 | 耦合方式 | 说明 |
+|------|---------|------|
+| VERL | 紧耦合 | 工具执行直接嵌入训练循环的 rollout 阶段 |
+| ROCK/ROLL | 中等耦合 | ROCK（执行层）与 ROLL（训练层）分离但协作 |
+| Agent Lightning | 完全解耦 | 训练系统与 agent runtime 彻底分离，Store 作为数据中枢 |
+
+Agent Lightning 论文强调的 "Training-Agent Disaggregation" 正是这一设计哲学的体现。
+
+### 8.3 接入侵入性对比
+
+```
+低侵入 ←————————————————————————————→ 高侵入
+
+Agent Lightning    VERL         ROCK/ROLL
+(包装为 LitAgent)  (实现 Tool)   (定义 env/奖励/调度)
+```
+
+### 8.4 核心设计哲学对比
+
+| 维度 | VERL | ROCK/ROLL | Agent Lightning |
+|------|------|-----------|-----------------|
+| 中心概念 | Tool + ToolParser | Sandbox + Pipeline | Tracer + Store |
+| Agent 生命周期 | 生成/工具执行/交互的状态机 | 安装→运行 / rollout→train | init→rollout→trace→store |
+| 奖励采集 | tool.calc_reward() 直接返回 | 环境侧计算 response_level_rewards | emit_reward() span 化事件 |
+| 扩展方式 | 继承 BaseTool/ToolParser | 继承 RockAgent/EnvManager | 实现 Algorithm/Runner/Tracer |
+
+### 8.5 本质差别总结
+
+三者在"如何定义 Agent"和"训练与执行的关系"上有根本不同：
+- **VERL** 把 Agent 等同于"工具调用能力"
+- **ROCK/ROLL** 把 Agent 视为"沙箱中的可执行实体"
+- **Agent Lightning** 把 Agent 视为"产出可观测轨迹的黑盒"
+
+但三者并非互斥，可以互补组合（见第 7 节）。
+
+## 9. 结论（工程选型）
 
 - **训练闭环优先** → VERL / Agent Lightning。
 - **环境稳定与隔离优先** → ROCK。
