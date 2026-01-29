@@ -136,10 +136,61 @@ Agent Lightning    VERL         ROCK/ROLL
 
 但三者并非互斥，可以互补组合（见第 7 节）。
 
-## 9. 结论（工程选型）
+## 9. Examples 中使用的 Agent 对比
+
+### 9.1 Agent Lightning Examples
+
+| 示例 | 使用的 Agent 框架 | 说明 |
+|------|------------------|------|
+| calc_x | **AutoGen** | `autogen_agentchat.agents.AssistantAgent` + MCP Calculator |
+| spider | **LangGraph/LangChain** | `StateGraph` 构建 SQL 生成/检查/重写流程 |
+| chartqa | **LangGraph** | 视觉语言 agent，多步推理 + 自我修正 |
+| rag | **OpenAI Agents SDK** | `agents.Agent` + `agents.Runner` + MCP Retriever |
+| claude_code | **Claude Code** | Anthropic 官方 SWE-bench agent |
+| apo | 自定义 | Automatic Prompt Optimization |
+| tinker | Tinker | 后端训练服务 |
+| unsloth | Unsloth | SFT 训练（4-bit 量化 + LoRA） |
+
+**特点**：支持多种主流 agent 框架的"零改动"接入，通过 `LitAgent` 包装即可训练。
+
+### 9.2 ROCK 支持的 Agent
+
+| Agent 类型 | 来源 | 说明 |
+|-----------|------|------|
+| RockAgent | 内建 | 通用 agent 基类，支持任意命令行 agent |
+| SweAgent | **SWE-agent** | 专门用于 SWE-bench 任务 |
+| Openhands | **OpenHands** | OpenHands Benchmarks SDK |
+| IFlowCli | **iFlow CLI** | 支持多种内建工具（Edit/Shell/Search/Web 等） |
+| LangChain | 集成 | 支持 `langchain`/`langchain-openai` 运行时环境 |
+
+**特点**：以 Sandbox 为核心，agent 以"安装 + 运行"方式在沙箱中执行，强调环境隔离。
+
+### 9.3 VERL 支持的 Tool（工具即 Agent）
+
+| Tool 类型 | 任务类型 | 说明 |
+|----------|---------|------|
+| Gsm8kTool | 数学问答 | GSM8K 答案评估工具 |
+| Geo3kTool | 几何问答 | Geo3K 几何推理工具 |
+| SearchTool | 搜索 | 类 Search-R1 的搜索工具 |
+| MCPSearchTool | MCP 搜索 | 通过 MCP 协议调用搜索服务 |
+| SandboxFusionTool | 代码执行 | 代码解释器（Code Interpreter） |
+| ImageZoomInTool | 视觉 | 图像放大工具 |
+
+**特点**：VERL 采用"工具调用"范式，agent 能力被抽象为 `BaseTool`，通过 `ToolAgentLoop` 解析模型输出并执行。
+
+### 9.4 接入方式对比总结
+
+| 框架 | Agent 抽象方式 | 接入成本 | 典型 Agent |
+|------|---------------|---------|-----------|
+| Agent Lightning | 包装为 `LitAgent` | 低 | AutoGen/LangGraph/Claude Code |
+| ROCK | 继承 `RockAgent` | 中 | SweAgent/OpenHands/iFlow |
+| VERL | 实现 `BaseTool` | 中 | GSM8K/Search/CodeInterpreter |
+
+## 10. 结论（工程选型）
 
 - **训练闭环优先** → VERL / Agent Lightning。
 - **环境稳定与隔离优先** → ROCK。
 - **大规模 agentic 训练调度优先** → ROLL。
-- **已有 agent 框架快速接入** → Agent Lightning。
+- **已有 agent 框架快速接入** → Agent Lightning（支持 AutoGen/LangGraph/Claude Code 等）。
 - **多轮工具调用训练** → VERL。
+- **SWE-bench 任务** → ROCK（SweAgent/OpenHands）或 Agent Lightning（Claude Code）。
