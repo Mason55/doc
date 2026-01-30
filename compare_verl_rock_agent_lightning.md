@@ -49,7 +49,125 @@
 | 适配成本 | 中等（需编排 tool schema/format） | ROCK 中等；ROLL 中等偏高（需要 env/奖励/调度配置） | 低（包装 agent 接口即可） |
 | 适配弹性 | 强：支持多模态/多工具 | 强：环境隔离 + 分布式训练 | 强：与多种 agent 框架兼容 |
 
-## 5. 扩展点对比
+## 5. Agent 编排机制对比（重点）
+
+### 5.1 Agent Lightning：Trainer-Runner-Agent 三层架构
+
+```
+Trainer (编排层)
+    ├── Algorithm (算法)
+    ├── Store (任务/数据中枢)
+    ├── Tracer (追踪)
+    └── ExecutionStrategy (进程管理)
+            │
+            ▼
+Runner (执行层) ◄── 轮询 Store 获取任务
+            │
+            ▼
+LitAgent (业务层) ── rollout() 执行
+```
+
+**编排流程**：
+```python
+# Trainer.fit() 启动
+ExecutionStrategy.run()
+    → Runner.iter() 轮询 Store
+    → Runner.step() 调用 LitAgent.rollout(task, resources, rollout)
+    → Tracer 采集 spans → Store 保存
+    → Algorithm 消费 Store 数据更新模型
+```
+
+**特点**：解耦设计，Agent 只负责 rollout，不感知训练逻辑；Store 作为数据中枢。
+
+### 5.2 VERL：状态机驱动的 Tool Agent Loop
+
+```
+ToolAgentLoop (状态机)
+    │
+    ├── PENDING ──▶ 准备 prompt
+    │
+    ├── GENERATING ──▶ 模型生成 + ToolParser 解析
+    │
+    ├── PROCESSING_TOOLS ──▶ 并发执行工具
+    │       │
+    │       └──▶ 结果注入消息 ──▶ 回到 GENERATING
+    │
+    └── TERMINATED ──▶ 输出 AgentLoopOutput
+```
+
+**编排流程**：
+```python
+async def run():
+    state = AgentState.PENDING
+    while state != AgentState.TERMINATED:
+        if state == PENDING:
+            state = _handle_pending_state()      # 准备 prompt
+        elif state == GENERATING:
+            state = _handle_generating_state()   # 模型生成 + 解析 tool_call
+        elif state == PROCESSING_TOOLS:
+            state = _handle_processing_tools()   # 并发执行工具
+    return AgentLoopOutput(...)
+```
+
+**特点**：状态机循环，工具即一等公民，模型生成与工具执行紧耦合。
+
+### 5.3 ROCK/ROLL：Pipeline + EnvManager 分布式编排
+
+```
+AgenticPipeline (ROLL 训练管线)
+    ├── ActorTrain / ActorInfer / Reference (Cluster)
+    │
+    └── RolloutScheduler
+            │
+            ├── EnvWorker 0 (EnvManager)
+            ├── EnvWorker 1 (EnvManager)
+            └── EnvWorker N (EnvManager)
+
+Sandbox (ROCK 执行层)
+    ├── Agent (install/run)
+    ├── RuntimeEnv (隔离环境)
+    └── ModelService (LLM 服务)
+```
+
+**ROLL 编排流程**：
+```python
+def step():
+    batch = rollout_scheduler.get_batch()           # 1. Rollout 采集
+    batch = actor_infer.compute_log_probs(batch)    # 2. 计算 log_probs
+    batch = compute_response_level_rewards(batch)   # 3. 计算奖励
+    batch = compute_advantage(batch)                # 4. 计算优势
+    actor_train.train_step(batch)                   # 5. 训练更新
+```
+
+**ROCK 编排流程**：
+```python
+async def run_agent():
+    sandbox = Sandbox(config)
+    await sandbox.start()
+    await sandbox.agent.install(config)   # 安装 agent 环境
+    result = await sandbox.agent.run(prompt)  # 执行 agent
+    await sandbox.stop()
+```
+
+**特点**：Ray 分布式调度，Sandbox 环境隔离，Episode 循环（reset → step → make_decision）。
+
+### 5.4 编排机制核心差异
+
+| 维度 | Agent Lightning | VERL | ROCK/ROLL |
+|------|----------------|------|-----------|
+| 编排模式 | Trainer-Runner-Agent 三层 | 状态机循环 | Pipeline + EnvManager |
+| 调度中心 | Store（任务队列） | AgentLoop（内部状态） | RolloutScheduler（Ray） |
+| Agent 执行 | `rollout()` 单次调用 | 状态转换循环 | `install()` + `run()` |
+| 工具/环境 | Agent 自行管理 | ToolParser + BaseTool | Sandbox + RuntimeEnv |
+| 分布式 | ExecutionStrategy | 依赖外部 | Ray Cluster 原生支持 |
+| 训练集成 | Algorithm 异步消费 | 紧耦合在 rollout 中 | Pipeline 显式调度 |
+
+**本质差异**：
+- **Agent Lightning**：以"可观测性"为中心，Agent 是黑盒，编排层只管调度和采集
+- **VERL**：以"工具调用"为中心，Agent 就是状态机 + 工具执行器
+- **ROCK/ROLL**：以"环境隔离 + 分布式"为中心，Agent 是沙箱中的可执行实体
+
+## 6. 扩展点对比
 
 ### VERL
 - 新工具：实现 `BaseTool` 并配置 tool schema。
@@ -70,13 +188,13 @@
 - 新 tracer：实现 `Tracer` 接入 OTEL/AgentOps。
 - Store：替换存储（memory/mongo 等）。
 
-## 6. 适用场景建议
+## 7. 适用场景建议
 
 - **VERL**：需要把“工具调用 + 多轮对话 + RL 训练”打通的训练系统。
 - **ROCK/ROLL**：ROCK 负责稳定可复用的 sandbox 环境管理；ROLL 负责 agentic 训练闭环与分布式调度。
 - **Agent Lightning**：希望低成本接入已有 agent 并形成训练闭环、统一观测与奖励采集。
 
-## 7. 组合方式建议（工程实践）
+## 8. 组合方式建议（工程实践）
 
 - VERL + ROCK/ROLL：
   - VERL 做工具调用与多轮 rollout，ROCK 负责环境执行隔离，ROLL 负责大规模训练调度。
@@ -85,9 +203,9 @@
 - VERL + Agent Lightning：
   - VERL 负责策略更新，Agent Lightning 负责跨 agent 的统一观测与评估。
 
-## 8. 本质差别分析
+## 9. 本质差别分析
 
-### 8.1 抽象层次不同
+### 9.1 抽象层次不同
 
 | 框架 | 抽象层次 | Agent 建模方式 |
 |------|---------|---------------|
@@ -99,7 +217,7 @@
 - **ROCK/ROLL**：ROCK 提供 Sandbox + RuntimeEnv + ModelService 的运行环境；ROLL 提供 rollout → reward → advantage → train 的完整训练闭环。
 - **Agent Lightning**：将 agent 执行建模为 MDP，所有行为统一为 Span/Trace，`LitAgent` 只负责业务逻辑与 rollout。
 
-### 8.2 训练与执行的耦合程度（核心架构差异）
+### 9.2 训练与执行的耦合程度（核心架构差异）
 
 | 框架 | 耦合方式 | 说明 |
 |------|---------|------|
@@ -109,7 +227,7 @@
 
 Agent Lightning 论文强调的 "Training-Agent Disaggregation" 正是这一设计哲学的体现。
 
-### 8.3 接入侵入性对比
+### 9.3 接入侵入性对比
 
 ```
 低侵入 ←————————————————————————————→ 高侵入
@@ -118,7 +236,7 @@ Agent Lightning    VERL         ROCK/ROLL
 (包装为 LitAgent)  (实现 Tool)   (定义 env/奖励/调度)
 ```
 
-### 8.4 核心设计哲学对比
+### 9.4 核心设计哲学对比
 
 | 维度 | VERL | ROCK/ROLL | Agent Lightning |
 |------|------|-----------|-----------------|
@@ -127,18 +245,18 @@ Agent Lightning    VERL         ROCK/ROLL
 | 奖励采集 | tool.calc_reward() 直接返回 | 环境侧计算 response_level_rewards | emit_reward() span 化事件 |
 | 扩展方式 | 继承 BaseTool/ToolParser | 继承 RockAgent/EnvManager | 实现 Algorithm/Runner/Tracer |
 
-### 8.5 本质差别总结
+### 9.5 本质差别总结
 
 三者在"如何定义 Agent"和"训练与执行的关系"上有根本不同：
 - **VERL** 把 Agent 等同于"工具调用能力"
 - **ROCK/ROLL** 把 Agent 视为"沙箱中的可执行实体"
 - **Agent Lightning** 把 Agent 视为"产出可观测轨迹的黑盒"
 
-但三者并非互斥，可以互补组合（见第 7 节）。
+但三者并非互斥，可以互补组合（见第 8 节）。
 
-## 9. Examples 中使用的 Agent 对比
+## 10. Examples 中使用的 Agent 对比
 
-### 9.1 Agent Lightning Examples
+### 10.1 Agent Lightning Examples
 
 | 示例 | 使用的 Agent 框架 | 说明 |
 |------|------------------|------|
@@ -153,7 +271,7 @@ Agent Lightning    VERL         ROCK/ROLL
 
 **特点**：支持多种主流 agent 框架的"零改动"接入，通过 `LitAgent` 包装即可训练。
 
-### 9.2 ROCK 支持的 Agent
+### 10.2 ROCK 支持的 Agent
 
 | Agent 类型 | 来源 | 说明 |
 |-----------|------|------|
@@ -165,7 +283,7 @@ Agent Lightning    VERL         ROCK/ROLL
 
 **特点**：以 Sandbox 为核心，agent 以"安装 + 运行"方式在沙箱中执行，强调环境隔离。
 
-### 9.3 VERL 支持的 Tool（工具即 Agent）
+### 10.3 VERL 支持的 Tool（工具即 Agent）
 
 | Tool 类型 | 任务类型 | 说明 |
 |----------|---------|------|
@@ -178,7 +296,7 @@ Agent Lightning    VERL         ROCK/ROLL
 
 **特点**：VERL 采用"工具调用"范式，agent 能力被抽象为 `BaseTool`，通过 `ToolAgentLoop` 解析模型输出并执行。
 
-### 9.4 接入方式对比总结
+### 10.4 接入方式对比总结
 
 | 框架 | Agent 抽象方式 | 接入成本 | 典型 Agent |
 |------|---------------|---------|-----------|
@@ -186,7 +304,7 @@ Agent Lightning    VERL         ROCK/ROLL
 | ROCK | 继承 `RockAgent` | 中 | SweAgent/OpenHands/iFlow |
 | VERL | 实现 `BaseTool` | 中 | GSM8K/Search/CodeInterpreter |
 
-## 10. 结论（工程选型）
+## 11. 结论（工程选型）
 
 - **训练闭环优先** → VERL / Agent Lightning。
 - **环境稳定与隔离优先** → ROCK。
